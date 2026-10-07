@@ -1,0 +1,139 @@
+name: Batch Video Compression AV1 (Windows + GDrive)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      gdrive_url:
+        description: 'URL Public Google Drive (File/Folder) Video Input'
+        required: false
+        default: 'https://drive.google.com/drive/folders/CONTOH_ID_FOLDER_KAMU'
+      is_folder:
+        description: 'Centang jika URL adalah link Folder (hilangkan centang jika link 1 file)'
+        type: boolean
+        default: true
+      ffmpeg_url:
+        description: 'URL Direct Download ffmpeg.exe Custom Kamu'
+        required: false
+
+env:
+  DEFAULT_FFMPEG_URL: 'https://github.com/scottluxe256-hub/compressions/releases/download/9.0.1/ffmpeg.exe'
+  DEFAULT_GDRIVE_URL: 'https://drive.google.com/drive/folders/1yq8pqNaUbRUtv_hzR1p7p9L9mqeLa4Wq'
+
+jobs:
+  batch-compress-windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python (Untuk gdown)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install gdown
+        run: |
+          python -m pip install --upgrade pip
+          pip install gdown
+          mkdir -p raw_videos
+
+      - name: Download Custom ffmpeg.exe
+        run: |
+          URL="${{ github.event.inputs.ffmpeg_url }}"
+          if [ -z "$URL" ]; then
+            URL="${{ env.DEFAULT_FFMPEG_URL }}"
+          fi
+
+          echo "Mengunduh ffmpeg.exe kustom dari: $URL"
+          curl -L "$URL" -o ffmpeg.exe
+
+      - name: Restore Cache Folder Compressed Videos
+        uses: actions/cache@v4
+        with:
+          path: compressed_videos
+          key: video-cache-${{ runner.os }}-${{ hashFiles('raw_videos/**') }}
+          restore-keys: |
+            video-cache-${{ runner.os }}-
+
+      - name: Download Video dari Google Drive
+        run: |
+          GDRIVE_LINK="${{ github.event.inputs.gdrive_url }}"
+          if [ -z "$GDRIVE_LINK" ]; then
+            GDRIVE_LINK="${{ env.DEFAULT_GDRIVE_URL }}"
+          fi
+
+          echo "Mengunduh dari Google Drive: $GDRIVE_LINK"
+          
+          # Cek apakah user menceklis input is_folder
+          if [ "${{ github.event.inputs.is_folder }}" = "true" ] || [ -z "${{ github.event.inputs.is_folder }}" ]; then
+            echo "📁 Mode Folder aktif..."
+            gdown --folder "$GDRIVE_LINK" -O raw_videos/
+          else
+            echo "📄 Mode Single File aktif..."
+            gdown "$GDRIVE_LINK" -O raw_videos/
+          fi
+
+      - name: Bersihkan Cache Lama yang Tidak Ada di Sumber GDrive
+        run: |
+          mkdir -p compressed_videos
+          echo "Memeriksa dan membersihkan file cache lama..."
+          for output_file in compressed_videos/*; do
+            [ -e "$output_file" ] || continue
+            filename=$(basename "$output_file")
+            raw_base="${filename%_AV1.mp4}"
+            
+            # Cek apakah file sumber asli masih ada di raw_videos (pencarian rekursif)
+            match=$(find raw_videos -type f -name "${raw_base}.*" | head -n 1)
+            if [ -z "$match" ]; then
+              echo "🗑️ Menghapus cache lama (tidak ada di GDrive): $filename"
+              rm "$output_file"
+            fi
+          done
+
+      - name: Proses Kompresi Batch dengan ffmpeg.exe Custom (AV1)
+        run: |
+          echo "=== Struktur Folder Hasil Download raw_videos ==="
+          find raw_videos -type f
+
+          find raw_videos -type f \( -iname "*.mp4" -o -iname "*.mov" -o -iname "*.m4v" -o -iname "*.mkv" -o -iname "*.avi" \) | tr -d '\r' | while read -r input_path; do
+            filename=$(basename "$input_path")
+            output_path="compressed_videos/${filename%.*}_AV1.mp4"
+
+            echo "=================================================="
+            echo "Memproses Video: $filename"
+            echo "Path Asli: $input_path"
+            echo "=================================================="
+
+            if [ -f "$output_path" ]; then
+              echo "⏩ SKIPPED: $filename sudah ada di Cache!"
+              continue
+            fi
+
+            ./ffmpeg.exe -nostdin -i "$input_path" \
+              -c:v libsvtav1 -preset 4 -crf 30 -r 60 -pix_fmt yuv420p \
+              -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv \
+              -g 120 -keyint_min 30 \
+              -sws_flags spline+accurate_rnd \
+              -vf "setpts=N/(60*TB),hqdn3d=1.0:1.0:4:4,scale='if(gt(iw,ih),-2,720)':'if(gt(iw,ih),720,-2)':flags=spline+accurate_rnd+full_chroma_int+full_chroma_inp,colorspace=all=bt709:range=tv" \
+              -c:a libfdk_aac -profile:a aac_he -b:a 64k \
+              -af "aresample=async=1000,apad" \
+              -tag:v av01 -metadata title="TikTok 8Bit Safe Color AV1" \
+              -movflags +faststart -shortest -y "$output_path" < /dev/null
+
+            echo "✅ Selesai memproses: $filename"
+          done
+
+      - name: Upload Artifact (Otomatis ZIP Langsung)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hasil-Kompresi-Batch-Windows-AV1-GDrive
+          path: compressed_videos/
+          retention-days: 7
